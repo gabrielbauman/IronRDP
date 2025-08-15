@@ -101,6 +101,80 @@ export class RemoteDesktopService {
         this.sendKeyboard(evt);
     }
 
+    /**
+     * Sends composed text (e.g., accented characters, emoji) to the remote desktop session.
+     *
+     * This method handles text that has been composed using browser composition events,
+     * typically from international keyboard layouts, IME systems, or dead key combinations.
+     * Each character is sent as individual Unicode press/release events to maintain
+     * compatibility with the RDP protocol.
+     *
+     * @param text - The composed text string to send. Must be a non-empty string.
+     * @example
+     * // Send Portuguese accented characters
+     * sendComposedText('ção'); // Will send ç, ã, o as separate Unicode events
+     *
+     * @example
+     * // Send emoji
+     * sendComposedText('👍'); // Will send the thumbs up emoji
+     */
+    sendComposedText(text: string): void {
+        // Validate input parameters
+        if (text === null || text === undefined || typeof text !== 'string' || text.length === 0) {
+            loggingService.info('sendComposedText: Invalid or empty text provided');
+            return;
+        }
+
+        const startTime = performance.now();
+
+        try {
+            loggingService.info(`Composition: Sending composed text "${text}" (${text.length} characters)`);
+
+            // Log individual characters for debugging international input
+            const charCodes = Array.from(text).map((char) => ({
+                char,
+                codePoint: char.codePointAt(0),
+                charCode: char.charCodeAt(0),
+            }));
+            loggingService.info('Composition: Character breakdown for ' + charCodes.length + ' characters');
+
+            // Send composed characters as unicode events.
+            // Each character needs both press and release events to simulate proper typing
+            const events: DeviceEvent[] = [];
+
+            for (const char of text) {
+                // Send press and release for each character.
+                events.push(this.module.DeviceEvent.unicodePressed(char));
+                events.push(this.module.DeviceEvent.unicodeReleased(char));
+            }
+
+            this.doTransactionFromDeviceEvents(events);
+
+            const duration = performance.now() - startTime;
+            loggingService.info(`Composition: Successfully sent ${text.length} characters in ${duration.toFixed(2)}ms`);
+        } catch (error) {
+            const duration = performance.now() - startTime;
+            loggingService.error('Composition: Failed to send composed text', {
+                error: error,
+                text: text,
+                textLength: text.length,
+                duration: duration.toFixed(2) + 'ms',
+                // Include additional context for debugging
+                sessionActive: this.session !== null && this.session !== undefined,
+                moduleAvailable: this.module?.DeviceEvent !== null && this.module?.DeviceEvent !== undefined,
+            });
+
+            // Log the specific error type to help with debugging
+            if (error instanceof Error) {
+                loggingService.error('Composition: Error details', {
+                    errorName: error.name,
+                    errorMessage: error.message,
+                    errorStack: error.stack,
+                });
+            }
+        }
+    }
+
     shutdown() {
         this.session?.shutdown();
     }
@@ -322,7 +396,24 @@ export class RemoteDesktopService {
         return true;
     }
 
+    /**
+     * Processes individual keyboard events and converts them to RDP device events.
+     * This method handles the distinction between regular key events and Unicode events,
+     * ensuring proper compatibility with composition and international input.
+     *
+     * @private
+     * @param evt - KeyboardEvent to process
+     */
     private sendKeyboard(evt: KeyboardEvent) {
+        // Composition Conflict Prevention: Skip processing if browser is handling composition
+        // This prevents interference between regular keyboard events and composition events
+        if (evt.isComposing) {
+            loggingService.info('Keyboard: Skipping event during browser composition - ' + evt.key);
+            return;
+        }
+
+        loggingService.info('Keyboard: Processing keyboard event - ' + evt.key + ' (' + evt.type + ')');
+
         evt.preventDefault();
 
         let keyEvent;
