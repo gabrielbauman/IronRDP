@@ -97,6 +97,108 @@
 
     /* Firefox-specific END */
 
+    /* Composition events for composed characters BEGIN */
+    let compositionInProgress = false;
+    let compositionData = '';
+    let ffDelayedCompositionData = '';
+
+    function captureKeys(evt: KeyboardEvent) {
+        if (capturingInputs()) {
+            // Skip processing during active composition.
+            if (compositionInProgress) {
+                evt.preventDefault();
+                return;
+            }
+
+            // Use isComposing to detect if this key is part of composition.
+            if (evt.isComposing) {
+                evt.preventDefault();
+                return;
+            }
+
+            if (ffPostponeKeyboardEvents) {
+                evt.preventDefault();
+                ffDelayedKeyboardEvents.push(evt);
+                return;
+            }
+
+            // For Firefox we need to make `onpaste` event still fire even if
+            // keyboard is being captured. Not capturing `Ctrl + V` should not create any
+            // side effects, therefore is safe to skip capture for it.
+            let isFirefoxPaste = isFirefox && isPasteKeyboardEvent(evt);
+
+            if (isFirefoxPaste) {
+                ffPostponeKeyboardEvents = true;
+                ffDelayedKeyboardEvents = [];
+                ffDelayedKeyboardEvents.push(evt);
+
+                // If during the given timeout we weren't able to finish the copy sequence, we need to
+                // simulate all queued keyboard events.
+                setTimeout(ffSimulateDelayedKeyEvents, FF_LOCAL_CLIPBOARD_COPY_TIMEOUT);
+                return;
+            }
+
+            keyboardEvent(evt);
+        }
+    }
+
+    function handleCompositionStart(evt: CompositionEvent) {
+        if (capturingInputs()) {
+            try {
+                compositionInProgress = true;
+                compositionData = evt.data ?? '';
+                loggingService.info(`Composition started: "${evt.data ?? ''}"`);
+            } catch (error) {
+                loggingService.error('Error handling composition start', { error });
+            }
+        }
+    }
+
+    function handleCompositionUpdate(evt: CompositionEvent) {
+        if (capturingInputs() && compositionInProgress) {
+            try {
+                compositionData = evt.data ?? '';
+                loggingService.info(`Composition update: "${evt.data ?? ''}"`);
+                // Optional: Send intermediate composition state for real-time feedback.
+                // remoteDesktopService.sendCompositionUpdate(evt.data);
+            } catch (error) {
+                loggingService.error('Error handling composition update', { error });
+            }
+        }
+    }
+
+    function handleCompositionEnd(evt: CompositionEvent) {
+        if (capturingInputs() && compositionInProgress) {
+            try {
+                const finalData = evt.data ?? compositionData;
+                loggingService.info(`Composition ended: "${finalData}"`);
+
+                // Firefox-specific: Handle delayed events.
+                if (isFirefox && ffPostponeKeyboardEvents) {
+                    // Queue composition result with delayed keyboard events.
+                    ffDelayedCompositionData = finalData;
+                    // Will be processed in ffSimulateDelayedKeyEvents.
+                    compositionInProgress = false;
+                    compositionData = '';
+                    return;
+                }
+
+                if (finalData.length > 0) {
+                    remoteDesktopService.sendComposedText(finalData);
+                }
+
+                compositionInProgress = false;
+                compositionData = '';
+            } catch (error) {
+                loggingService.error('Error handling composition end', { error });
+                // Reset state on error to prevent stuck composition.
+                compositionInProgress = false;
+                compositionData = '';
+            }
+        }
+    }
+    /* Composition events for composed characters END */
+
     /* Clipboard initialization BEGIN */
     function initClipboard() {
         // Detect if browser supports async Clipboard API
@@ -355,6 +457,13 @@
     }
 
     function ffSimulateDelayedKeyEvents() {
+        // Process delayed composition first
+        if (ffDelayedCompositionData.length > 0) {
+            remoteDesktopService.sendComposedText(ffDelayedCompositionData);
+            ffDelayedCompositionData = '';
+        }
+
+        // Then process delayed keyboard events
         if (ffDelayedKeyboardEvents.length > 0) {
             for (const evt of ffDelayedKeyboardEvents) {
                 // simulate consecutive key events
@@ -426,36 +535,13 @@
         serverBridgeListeners();
         userInteractionListeners();
 
-        function captureKeys(evt: KeyboardEvent) {
-            if (capturingInputs()) {
-                if (ffPostponeKeyboardEvents) {
-                    evt.preventDefault();
-                    ffDelayedKeyboardEvents.push(evt);
-                    return;
-                }
-
-                // For Firefox we need to make `onpaste` event still fire even if
-                // keyboard is being captured. Not capturing `Ctrl + V` should not create any
-                // side effects, therefore is safe to skip capture for it.
-                let isFirefoxPaste = isFirefox && isPasteKeyboardEvent(evt);
-
-                if (isFirefoxPaste) {
-                    ffPostponeKeyboardEvents = true;
-                    ffDelayedKeyboardEvents = [];
-                    ffDelayedKeyboardEvents.push(evt);
-
-                    // If during the given timeout we weren't able to finish the copy sequence, we need to
-                    // simulate all queued keyboard events.
-                    setTimeout(ffSimulateDelayedKeyEvents, FF_LOCAL_CLIPBOARD_COPY_TIMEOUT);
-                    return;
-                }
-
-                keyboardEvent(evt);
-            }
-        }
-
         window.addEventListener('keydown', captureKeys, false);
         window.addEventListener('keyup', captureKeys, false);
+
+        // Add composition event listeners
+        window.addEventListener('compositionstart', handleCompositionStart, false);
+        window.addEventListener('compositionupdate', handleCompositionUpdate, false);
+        window.addEventListener('compositionend', handleCompositionEnd, false);
 
         window.addEventListener('focus', focusEventHandler);
     }
@@ -747,6 +833,14 @@
     onDestroy(() => {
         window.removeEventListener('resize', resizeHandler);
         window.removeEventListener('focus', focusEventHandler);
+
+        // Clean up composition event listeners
+        window.removeEventListener('keydown', captureKeys);
+        window.removeEventListener('keyup', captureKeys);
+        window.removeEventListener('compositionstart', handleCompositionStart);
+        window.removeEventListener('compositionupdate', handleCompositionUpdate);
+        window.removeEventListener('compositionend', handleCompositionEnd);
+
         componentDestroyed = true;
     });
 </script>
