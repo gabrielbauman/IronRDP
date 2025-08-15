@@ -92,6 +92,27 @@ export class RemoteDesktopService {
         this.sendKeyboard(evt);
     }
 
+    sendComposedText(text: string): void {
+        if (text === null || text === undefined || typeof text !== 'string' || text.length === 0) return;
+
+        try {
+            loggingService.info(`Sending composed text: "${text}"`);
+
+            // Send composed characters as unicode events.
+            const events: DeviceEvent[] = [];
+
+            for (const char of text) {
+                // Send press and release for each character.
+                events.push(this.module.DeviceEvent.unicodePressed(char));
+                events.push(this.module.DeviceEvent.unicodeReleased(char));
+            }
+
+            this.doTransactionFromDeviceEvents(events);
+        } catch (error) {
+            loggingService.error('Error sending composed text', { error, text });
+        }
+    }
+
     shutdown() {
         this.session?.shutdown();
     }
@@ -292,6 +313,12 @@ export class RemoteDesktopService {
     }
 
     private sendKeyboard(evt: KeyboardEvent) {
+        // Don't process if composition is handling this.
+        if (evt.isComposing) {
+            loggingService.info('Skipping keyboard event during composition');
+            return;
+        }
+
         evt.preventDefault();
 
         let keyEvent;
