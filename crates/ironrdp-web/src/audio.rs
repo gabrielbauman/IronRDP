@@ -611,7 +611,10 @@ impl RdpsndClientHandler for WebAudioBackend {
 
         // Store pitch value but don't implement pitch shifting for now
         // Web Audio API pitch shifting would require more complex processing
-        self.pitch = pitch.pitch as f32 / 65535.0;
+        #[expect(clippy::cast_precision_loss)] // pitch range is 0..=65535, well within f32 precision
+        {
+            self.pitch = pitch.pitch.min(65535) as f32 / 65535.0;
+        }
     }
 
     fn close(&mut self) {
