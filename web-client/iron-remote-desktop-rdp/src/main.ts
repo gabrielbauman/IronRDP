@@ -43,3 +43,23 @@ export function outboundMessageSizeLimit(limit: number): Extension {
 export function enableCredssp(enable: boolean): Extension {
     return new Extension('enable_credssp', enable);
 }
+
+/**
+ * Enable or disable audio playback for the RDP session.
+ *
+ * Requires a user gesture (click/touch/keypress) before audio will play
+ * due to browser autoplay policy.
+ */
+export function enableAudio(enable: boolean): Extension {
+    return new Extension('enable_audio', enable);
+}
+
+/**
+ * Set the preferred sample rate for audio format negotiation (e.g. 48000).
+ *
+ * Defaults to the browser's native rate. The client handles conversion
+ * automatically if the server picks a different rate.
+ */
+export function audioSampleRate(rate: number): Extension {
+    return new Extension('audio_sample_rate', rate);
+}
