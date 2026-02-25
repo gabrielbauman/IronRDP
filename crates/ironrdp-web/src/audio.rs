@@ -23,8 +23,6 @@ pub(crate) struct WebAudioBackend {
     gain_node: GainNode,
     context_sample_rate: f32,
     supported_formats: Vec<AudioFormat>,
-    #[expect(dead_code)] // Will be used for future audio optimization
-    browser_capabilities: BrowserAudioCapabilities,
     volume: f32,
     pitch: f32,
     is_active: bool,
@@ -36,15 +34,6 @@ pub(crate) struct WebAudioBackend {
 struct AudioQueue {
     context: AudioContext,
     current_time: f64,
-}
-
-#[derive(Debug, Clone)]
-struct BrowserAudioCapabilities {
-    supported_sample_rates: Vec<u32>,
-    #[expect(dead_code)] // Reserved for future bandwidth optimization
-    max_sample_rate: f32,
-    #[expect(dead_code)] // Reserved for future quality fallback
-    min_sample_rate: f32,
 }
 
 impl WebAudioBackend {
@@ -68,8 +57,8 @@ impl WebAudioBackend {
         let context_sample_rate = audio_context.sample_rate();
         let requested_rate = sample_rate.unwrap_or(context_sample_rate);
 
-        let browser_capabilities = Self::detect_browser_capabilities(&audio_context);
-        let supported_formats = Self::create_supported_formats(requested_rate, &browser_capabilities);
+        let supported_sample_rates = Self::supported_sample_rates(&audio_context);
+        let supported_formats = Self::create_supported_formats(requested_rate, &supported_sample_rates);
 
         let audio_queue = AudioQueue {
             context: audio_context.clone(),
@@ -81,7 +70,6 @@ impl WebAudioBackend {
             gain_node,
             context_sample_rate,
             supported_formats,
-            browser_capabilities,
             volume: 1.0,
             pitch: 1.0,
             is_active: true,
@@ -107,38 +95,27 @@ impl WebAudioBackend {
         Ok(backend)
     }
 
-    /// Detect browser audio capabilities
-    /// Simplified to focus on sample rate support since we only use PCM
-    fn detect_browser_capabilities(audio_context: &AudioContext) -> BrowserAudioCapabilities {
-        let context_sample_rate = audio_context.sample_rate();
-
-        // Common sample rates that browsers and RDP servers typically support
-        let mut supported_sample_rates = vec![22050, 44100, 48000];
-
-        // Add the context's native sample rate if not already included
-        #[expect(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        let native_rate = context_sample_rate.round() as u32;
-        if !supported_sample_rates.contains(&native_rate) {
-            supported_sample_rates.push(native_rate);
-            supported_sample_rates.sort_unstable();
+    /// Return the sample rates to advertise for format negotiation.
+    #[expect(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    fn supported_sample_rates(audio_context: &AudioContext) -> Vec<u32> {
+        let mut rates = vec![22050, 44100, 48000];
+        let native_rate = audio_context.sample_rate().round() as u32;
+        if !rates.contains(&native_rate) {
+            rates.push(native_rate);
+            rates.sort_unstable();
         }
-
-        BrowserAudioCapabilities {
-            supported_sample_rates,
-            max_sample_rate: context_sample_rate,
-            min_sample_rate: 8000.0, // Minimum for voice quality
-        }
+        rates
     }
 
-    /// Create the list of audio formats supported by the web backend
-    /// Only advertises PCM formats that we can actually decode and that RDP servers commonly support
+    /// Create the list of audio formats supported by the web backend.
+    /// Only advertises PCM formats that we can actually decode.
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn create_supported_formats(preferred_rate: f32, capabilities: &BrowserAudioCapabilities) -> Vec<AudioFormat> {
+    fn create_supported_formats(preferred_rate: f32, supported_rates: &[u32]) -> Vec<AudioFormat> {
         let mut formats = Vec::new();
 
         // Priority order: preferred rate first, then other supported rates
         let mut rates_to_add = vec![preferred_rate.round() as u32];
-        for &rate in &capabilities.supported_sample_rates {
+        for &rate in supported_rates {
             if rate != preferred_rate.round() as u32 {
                 rates_to_add.push(rate);
             }
@@ -309,28 +286,22 @@ impl WebAudioBackend {
             );
         }
 
-        // Convert channel count if needed
-        let target_channels = 2; // Web Audio typically works best with stereo
-        if format.n_channels == 1 && target_channels == 2 {
+        // Convert channel count to stereo output
+        let output_channels: u16 = 2;
+        if format.n_channels == 1 {
             debug!("Converting mono to stereo");
             float_samples = Self::convert_mono_to_stereo(&float_samples);
-        } else if format.n_channels == 2 && target_channels == 1 {
-            debug!("Converting stereo to mono");
-            float_samples = Self::convert_stereo_to_mono(&float_samples);
         }
+        // If format.n_channels == 2, no conversion needed.
+        // We only advertise mono and stereo PCM, so other counts shouldn't arrive.
 
-        let final_channels = if format.n_channels == 1 && target_channels == 2 {
-            2
-        } else {
-            format.n_channels
-        };
-        let sample_count = float_samples.len() / final_channels as usize;
+        let sample_count = float_samples.len() / output_channels as usize;
 
         let buffer = self
             .audio_context
             .create_buffer(
-                final_channels.into(),
-                u32::try_from(sample_count).map_err(|_| anyhow::Error::msg("Sample count too large"))?,
+                output_channels.into(),
+                u32::try_from(sample_count).map_err(|_| anyhow::Error::msg("sample count too large"))?,
                 context_rate as f32,
             )
             .map_err(|e| anyhow::Error::msg(format!("failed to create Web Audio buffer: {e:?}")))?;
@@ -338,11 +309,11 @@ impl WebAudioBackend {
         // Deinterleave and copy into each channel.
         // NOTE: AudioBuffer::get_channel_data() returns a *copy* in wasm-bindgen,
         // so we must use copy_to_channel() to actually write into the buffer.
-        for channel in 0..final_channels {
+        for channel in 0..output_channels {
             let channel_data: Vec<f32> = float_samples
                 .iter()
                 .skip(channel as usize)
-                .step_by(final_channels as usize)
+                .step_by(output_channels as usize)
                 .copied()
                 .collect();
 
@@ -355,9 +326,8 @@ impl WebAudioBackend {
     }
 
     /// Apply current volume to the gain node
-    fn apply_volume(&self) -> Result<(), IronError> {
+    fn apply_volume(&self) {
         self.gain_node.gain().set_value(self.volume);
-        Ok(())
     }
 
     /// Check if the audio context is running and process any pending audio data.
@@ -591,9 +561,7 @@ impl RdpsndClientHandler for WebAudioBackend {
         let right_gain = f32::from(volume.volume_right) / 65535.0;
         self.volume = (left_gain + right_gain) / 2.0;
 
-        if let Err(_e) = self.apply_volume() {
-            error!("Failed to apply volume");
-        }
+        self.apply_volume();
     }
 
     fn set_pitch(&mut self, pitch: PitchPdu) {
@@ -751,13 +719,9 @@ mod tests {
 
     #[test]
     fn test_create_supported_formats_includes_preferred_rate() {
-        let capabilities = BrowserAudioCapabilities {
-            supported_sample_rates: vec![22050, 44100, 48000],
-            max_sample_rate: 48000.0,
-            min_sample_rate: 8000.0,
-        };
+        let supported_rates = vec![22050, 44100, 48000];
 
-        let formats = WebAudioBackend::create_supported_formats(44100.0, &capabilities);
+        let formats = WebAudioBackend::create_supported_formats(44100.0, &supported_rates);
 
         // Should have formats for both stereo and mono for each rate
         assert!(formats.len() >= 6); // At least 3 rates × 2 channel configs
