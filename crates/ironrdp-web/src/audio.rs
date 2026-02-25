@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 
 use ironrdp::rdpsnd::client::RdpsndClientHandler;
 use ironrdp::rdpsnd::pdu::{AudioFormat, AudioFormatFlags, PitchPdu, VolumePdu, WaveFormat};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast as _;
 use web_sys::{AudioBuffer, AudioContext, Event, GainNode};
@@ -297,7 +297,7 @@ impl WebAudioBackend {
         #[expect(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         let context_rate = self.context_sample_rate.round() as u32;
         if format.n_samples_per_sec != context_rate {
-            info!(
+            trace!(
                 "Converting sample rate from {}Hz to {}Hz",
                 format.n_samples_per_sec, context_rate
             );
@@ -494,7 +494,7 @@ impl AudioQueue {
         // Update tracking time for next buffer
         self.current_time = start_time + buffer.duration();
 
-        info!(
+        trace!(
             "Audio buffer scheduled: duration={:.3}s, start_time={:.3}s, next_time={:.3}s, context_time={:.3}s",
             buffer.duration(),
             start_time,
@@ -525,7 +525,7 @@ impl RdpsndClientHandler for WebAudioBackend {
     }
 
     fn wave(&mut self, format_no: usize, ts: u32, data: Cow<'_, [u8]>) {
-        info!(
+        trace!(
             "Received audio wave: format_no={}, timestamp={}, data_len={} bytes",
             format_no,
             ts,
@@ -553,7 +553,7 @@ impl RdpsndClientHandler for WebAudioBackend {
                     if let Err(e) = self.audio_queue.enqueue_audio(buffer, &self.gain_node) {
                         error!("Failed to enqueue audio: {:?}", e);
                     } else {
-                        info!("Successfully processed audio format: {:?}", format.format);
+                        trace!("Successfully processed audio format: {:?}", format.format);
                     }
                 }
                 Err(e) => {
@@ -565,7 +565,7 @@ impl RdpsndClientHandler for WebAudioBackend {
             if self.pending_audio_data.len() < 10 {
                 // Limit buffer size
                 self.pending_audio_data.push_back((data.to_vec(), format));
-                info!(
+                debug!(
                     "Audio data buffered (context not ready), queue size: {}",
                     self.pending_audio_data.len()
                 );
@@ -578,7 +578,7 @@ impl RdpsndClientHandler for WebAudioBackend {
     }
 
     fn set_volume(&mut self, volume: VolumePdu) {
-        info!(
+        debug!(
             "Setting volume: left={}, right={} (gain: {:.2})",
             volume.volume_left,
             volume.volume_right,
@@ -597,7 +597,7 @@ impl RdpsndClientHandler for WebAudioBackend {
     }
 
     fn set_pitch(&mut self, pitch: PitchPdu) {
-        info!(
+        debug!(
             "Setting pitch: {} (note: pitch control not implemented for web)",
             pitch.pitch
         );
