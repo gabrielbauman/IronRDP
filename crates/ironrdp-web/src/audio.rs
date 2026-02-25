@@ -364,10 +364,11 @@ impl WebAudioBackend {
             }
         };
 
+        type ClosureSlot = std::rc::Rc<core::cell::RefCell<Option<Closure<dyn FnMut(Event)>>>>;
+
         // We store the closure in an Rc so that it can remove itself from the
         // event listeners once the context is running, then drop itself.
-        let closure_slot: std::rc::Rc<core::cell::RefCell<Option<Closure<dyn FnMut(Event)>>>> =
-            std::rc::Rc::new(core::cell::RefCell::new(None));
+        let closure_slot: ClosureSlot = std::rc::Rc::new(core::cell::RefCell::new(None));
 
         let closure_slot_inner = std::rc::Rc::clone(&closure_slot);
         let document_inner = document.clone();
@@ -467,12 +468,12 @@ impl AudioQueue {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 // SAFETY: This crate only targets `wasm32-unknown-unknown` which is single-threaded.
 // `WebAudioBackend` contains non-Send JS handle types (`AudioContext`, `GainNode`,
 // `Closure`) that are safe to move between Rust "threads" (futures tasks) in this
 // single-threaded WASM execution environment. The `RdpsndClientHandler` trait
 // requires `Send` because the same trait is used in native multi-threaded builds.
-#[cfg(target_arch = "wasm32")]
 unsafe impl Send for WebAudioBackend {}
 
 impl RdpsndClientHandler for WebAudioBackend {
