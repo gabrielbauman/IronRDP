@@ -46,38 +46,19 @@ export function enableCredssp(enable: boolean): Extension {
 
 /**
  * Enable or disable audio playback for the RDP session.
- * 
- * When enabled, the client will negotiate audio capabilities with the server
- * and attempt to play PCM audio through the browser's Web Audio API.
- * 
- * Requirements:
- * - Modern browsers with Web Audio API support (Chrome 14+, Firefox 25+, Safari 6+)
- * - User gesture activation (click, touch, or keypress) required by browser security policy
- * 
- * @param enable - Whether to enable audio playback
- * @returns Extension for audio enablement
+ *
+ * Requires a user gesture (click/touch/keypress) before audio will play
+ * due to browser autoplay policy.
  */
 export function enableAudio(enable: boolean): Extension {
     return new Extension('enable_audio', enable);
 }
 
 /**
- * Set the preferred sample rate for audio format negotiation.
- * 
- * This influences which PCM format the server is likely to choose by placing
- * the specified sample rate first in the client's advertised format list.
- * The implementation automatically handles sample rate conversion if the server
- * chooses a different rate, so this is primarily an optimization.
- * 
- * Common sample rates:
- * - 22050 Hz - Lower bandwidth, suitable for voice
- * - 44100 Hz - CD quality
- * - 48000 Hz - Professional audio, often browser native
- * 
- * If not specified, the browser's native sample rate is used as the preference.
- * 
- * @param rate - Preferred sample rate in Hz (e.g., 48000 for 48kHz)
- * @returns Extension for sample rate preference
+ * Set the preferred sample rate for audio format negotiation (e.g. 48000).
+ *
+ * Defaults to the browser's native rate. The client handles conversion
+ * automatically if the server picks a different rate.
  */
 export function audioSampleRate(rate: number): Extension {
     return new Extension('audio_sample_rate', rate);
