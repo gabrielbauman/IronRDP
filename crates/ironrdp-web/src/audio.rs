@@ -162,7 +162,7 @@ impl WebAudioBackend {
     /// Future enhancement: Consider higher-quality resampling for specialized use cases.
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn convert_sample_rate(input_samples: &[f32], from_rate: u32, to_rate: u32, channels: u16) -> Vec<f32> {
-        if from_rate == to_rate {
+        if from_rate == to_rate || channels == 0 || input_samples.is_empty() {
             return input_samples.to_vec();
         }
 
