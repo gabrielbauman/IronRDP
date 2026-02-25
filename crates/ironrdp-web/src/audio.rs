@@ -506,7 +506,12 @@ impl AudioQueue {
     }
 }
 
-// SAFETY: In WebAssembly single-threaded environment, Send is safe for WebAudioBackend
+// SAFETY: This crate only targets `wasm32-unknown-unknown` which is single-threaded.
+// `WebAudioBackend` contains non-Send JS handle types (`AudioContext`, `GainNode`,
+// `Closure`) that are safe to move between Rust "threads" (futures tasks) in this
+// single-threaded WASM execution environment. The `RdpsndClientHandler` trait
+// requires `Send` because the same trait is used in native multi-threaded builds.
+#[cfg(target_arch = "wasm32")]
 unsafe impl Send for WebAudioBackend {}
 
 impl RdpsndClientHandler for WebAudioBackend {
