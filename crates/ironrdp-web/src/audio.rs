@@ -1,12 +1,11 @@
-use core::cell::RefCell;
 use std::borrow::Cow;
 use std::collections::VecDeque;
-use std::rc::Rc;
 
 use ironrdp::rdpsnd::client::RdpsndClientHandler;
 use ironrdp::rdpsnd::pdu::{AudioFormat, AudioFormatFlags, PitchPdu, VolumePdu, WaveFormat};
 use tracing::{debug, error, info, warn};
-use wasm_bindgen::{closure::Closure, JsCast as _};
+use wasm_bindgen::closure::Closure;
+use wasm_bindgen::JsCast as _;
 use web_sys::{AudioBuffer, AudioContext, Event, GainNode};
 
 use crate::error::IronError;
@@ -29,7 +28,6 @@ pub(crate) struct WebAudioBackend {
     volume: f32,
     pitch: f32,
     is_active: bool,
-    context_ready: Rc<RefCell<bool>>,
     pending_audio_data: VecDeque<(Vec<u8>, AudioFormat)>,
     audio_queue: AudioQueue,
 }
@@ -78,9 +76,6 @@ impl WebAudioBackend {
             current_time: audio_context.current_time(),
         };
 
-        let context_ready = Rc::new(RefCell::new(false));
-
-        // Set up user gesture activation
         let backend = Self {
             audio_context: audio_context.clone(),
             gain_node,
@@ -89,8 +84,7 @@ impl WebAudioBackend {
             browser_capabilities,
             volume: 1.0,
             pitch: 1.0,
-            is_active: true, // Mark as active by default
-            context_ready: Rc::clone(&context_ready),
+            is_active: true,
             pending_audio_data: VecDeque::new(),
             audio_queue,
         };
@@ -108,7 +102,7 @@ impl WebAudioBackend {
         }
 
         // Set up one-time user gesture listener on document
-        Self::setup_user_gesture_listener(audio_context, context_ready);
+        Self::setup_user_gesture_listener(audio_context);
 
         Ok(backend)
     }
@@ -366,38 +360,33 @@ impl WebAudioBackend {
         Ok(())
     }
 
-    /// Try to resume audio context and process pending audio data
+    /// Check if the audio context is running and process any pending audio data.
+    ///
+    /// Returns `Ok(())` when the context is in the `Running` state.
+    /// Returns `Err` when the context is still suspended (waiting for user gesture).
     fn try_resume_and_process_pending(&mut self) -> Result<(), IronError> {
-        if *self.context_ready.borrow() {
-            return Ok(());
+        if self.audio_context.state() != web_sys::AudioContextState::Running {
+            // Context still suspended; the user-gesture listener will call resume().
+            return Err(anyhow::Error::msg("audio context suspended - user gesture required").into());
         }
 
-        // Try to resume the audio context
-        match self.audio_context.resume() {
-            Ok(_) => {
-                debug!("Audio context resumed successfully");
-                *self.context_ready.borrow_mut() = true;
-
-                // Process any pending audio data
-                while let Some((data, format)) = self.pending_audio_data.pop_front() {
-                    if let Ok(buffer) = self.create_audio_buffer(&data, &format) {
-                        if let Err(_e) = self.audio_queue.enqueue_audio(buffer, &self.gain_node) {
-                            error!("Failed to enqueue pending audio");
-                        }
-                    }
+        // Process any pending audio data that was buffered while suspended
+        while let Some((data, format)) = self.pending_audio_data.pop_front() {
+            if let Ok(buffer) = self.create_audio_buffer(&data, &format) {
+                if let Err(e) = self.audio_queue.enqueue_audio(buffer, &self.gain_node) {
+                    error!("Failed to enqueue pending audio: {e:?}");
                 }
-
-                Ok(())
-            }
-            Err(_) => {
-                // Context still suspended, likely needs user gesture
-                Err(anyhow::Error::msg("Audio context suspended - user gesture required").into())
             }
         }
+
+        Ok(())
     }
 
-    /// Set up a one-time listener for user gestures to activate audio context
-    fn setup_user_gesture_listener(audio_context: AudioContext, context_ready: Rc<RefCell<bool>>) {
+    /// Set up a one-time listener for user gestures to activate audio context.
+    ///
+    /// Browsers require a user gesture before allowing audio playback.
+    /// Once the context transitions to `Running`, the listeners are removed.
+    fn setup_user_gesture_listener(audio_context: AudioContext) {
         let window = match web_sys::window() {
             Some(w) => w,
             None => {
@@ -414,39 +403,41 @@ impl WebAudioBackend {
             }
         };
 
-        // Simplified closure pattern with proper cleanup
-        let activation_handler = Rc::new(RefCell::new(None::<Closure<dyn FnMut(Event)>>));
-        let handler_clone = Rc::clone(&activation_handler);
-        let document_clone = document.clone();
+        // We store the closure in an Rc so that it can remove itself from the
+        // event listeners once the context is running, then drop itself.
+        let closure_slot: std::rc::Rc<core::cell::RefCell<Option<Closure<dyn FnMut(Event)>>>> =
+            std::rc::Rc::new(core::cell::RefCell::new(None));
 
-        let activate_closure = Closure::wrap(Box::new(move |_event: Event| {
-            // Use compare-and-swap pattern to prevent race conditions
-            if let Ok(mut ready) = context_ready.try_borrow_mut() {
-                if !*ready {
-                    match audio_context.resume() {
-                        Ok(_) => {
-                            info!("Audio context activated by user gesture");
-                            *ready = true;
+        let closure_slot_inner = std::rc::Rc::clone(&closure_slot);
+        let document_inner = document.clone();
 
-                            // Remove event listeners to prevent memory leak
-                            if let Some(handler) = handler_clone.borrow_mut().take() {
-                                let callback = handler.as_ref().unchecked_ref();
-                                let _ = document_clone.remove_event_listener_with_callback("click", callback);
-                                let _ = document_clone.remove_event_listener_with_callback("keydown", callback);
-                                let _ = document_clone.remove_event_listener_with_callback("touchstart", callback);
-                                debug!("Audio gesture event listeners removed after activation");
-                            }
-                        }
-                        Err(e) => {
-                            debug!("Failed to resume audio context on user gesture: {e:?}");
-                        }
-                    }
+        let closure = Closure::wrap(Box::new(move |_event: Event| {
+            if audio_context.state() == web_sys::AudioContextState::Running {
+                // Already running — just clean up.
+            } else {
+                // resume() returns a Promise; the context transitions asynchronously.
+                // We don't need to track the promise — we'll check the state on next wave().
+                let _ = audio_context.resume();
+                info!("Audio context resume requested via user gesture");
+
+                // Don't remove listeners yet — we'll be called again on the next
+                // gesture if the context hasn't transitioned yet.
+                if audio_context.state() != web_sys::AudioContextState::Running {
+                    return;
                 }
+            }
+
+            // Context is running — remove listeners and drop the closure.
+            if let Some(handler) = closure_slot_inner.borrow_mut().take() {
+                let callback = handler.as_ref().unchecked_ref();
+                let _ = document_inner.remove_event_listener_with_callback("click", callback);
+                let _ = document_inner.remove_event_listener_with_callback("keydown", callback);
+                let _ = document_inner.remove_event_listener_with_callback("touchstart", callback);
+                debug!("Audio gesture event listeners removed after activation");
             }
         }) as Box<dyn FnMut(Event)>);
 
-        // Add listeners for common user interaction events with error handling
-        let callback_ref = activate_closure.as_ref().unchecked_ref();
+        let callback_ref = closure.as_ref().unchecked_ref();
         if let Err(e) = document.add_event_listener_with_callback("click", callback_ref) {
             warn!("Failed to add click listener for audio activation: {e:?}");
         }
@@ -459,8 +450,8 @@ impl WebAudioBackend {
 
         info!("Audio gesture activation listeners registered (click, keydown, touchstart)");
 
-        // Store the closure to prevent it from being dropped
-        *activation_handler.borrow_mut() = Some(activate_closure);
+        // Store the closure inside the slot to keep it alive.
+        *closure_slot.borrow_mut() = Some(closure);
     }
 }
 
