@@ -266,7 +266,8 @@ impl WebAudioBackend {
         if format.n_samples_per_sec != context_rate {
             trace!(
                 "Converting sample rate from {}Hz to {}Hz",
-                format.n_samples_per_sec, context_rate
+                format.n_samples_per_sec,
+                context_rate
             );
             float_samples = Self::convert_sample_rate(
                 &float_samples,
